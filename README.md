@@ -1,0 +1,115 @@
+# reverse_proxy
+
+A SOCKS5 proxy with a Burp Suite-style terminal UI for inspecting HTTP/HTTPS traffic.
+
+## Features
+
+- **SOCKS5 proxy** with CONNECT support (IPv4, IPv6, domain names)
+- **Burp-style TUI**: host sidebar, HTTP history table, request/response detail pane
+- **Multiple view modes**: Raw (human-readable text), Headers, and Hex dump
+- **HTTP auto-detection**: displays HTTP payloads as readable text, binary as hex
+- **TLS MITM interception**: decrypt and inspect HTTPS traffic with `--mitm` flag
+- **Payload capture**: up to 1 MB per direction per connection
+
+## Building
+
+```bash
+go build -o socks5proxy .
+```
+
+## Usage
+
+```bash
+# Listen on a random available port
+./socks5proxy
+
+# Listen on a specific port
+./socks5proxy -port 1080
+
+# Enable TLS interception
+./socks5proxy -port 1080 -mitm
+```
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-port` | `0` | Port to listen on (0 = random) |
+| `-mitm` | `false` | Enable TLS MITM interception |
+| `-ca-cert` | `ca.pem` | Path to CA certificate file |
+| `-ca-key` | `ca-key.pem` | Path to CA private key file |
+
+### Keyboard Controls
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Cycle focus between panes (hosts, table, detail) |
+| `1` | Show request payload |
+| `2` | Show response payload |
+| `r` | Raw view (human-readable text) |
+| `h` | Headers view |
+| `x` | Hex dump view |
+| `q` | Quit |
+
+## Testing with curl
+
+```bash
+# Plain HTTP
+curl --socks5 127.0.0.1:1080 http://example.com
+
+# HTTPS with MITM (trust the generated CA for this request)
+curl --socks5 127.0.0.1:1080 --cacert ca.pem https://example.com
+```
+
+## Configuring a browser to use the proxy
+
+### Set the SOCKS5 proxy
+
+**Firefox:**
+1. Go to Settings > Network Settings > Manual proxy configuration
+2. Set SOCKS Host to `127.0.0.1`, Port to `1080` (or whichever port you chose)
+3. Select SOCKS v5
+
+**Chrome / Chromium (command line):**
+```bash
+google-chrome --proxy-server="socks5://127.0.0.1:1080"
+```
+
+**System-wide (Linux):**
+```bash
+export ALL_PROXY=socks5://127.0.0.1:1080
+```
+
+### Trusting the CA certificate for HTTPS interception
+
+When using `--mitm`, the proxy generates a CA certificate (`ca.pem`) on first run. Browsers will show certificate warnings because they don't trust this CA. To fix this, import the CA into your browser or OS trust store.
+
+**Firefox:**
+1. Go to Settings > Privacy & Security > Certificates > View Certificates
+2. Go to the Authorities tab
+3. Click Import and select the `ca.pem` file
+4. Check "Trust this CA to identify websites" and click OK
+
+**Chrome / Chromium:**
+1. Go to `chrome://settings/certificates`
+2. Go to the Authorities tab
+3. Click Import and select the `ca.pem` file
+4. Check "Trust this certificate for identifying websites" and click OK
+
+**Linux (system-wide):**
+```bash
+sudo cp ca.pem /usr/local/share/ca-certificates/socks5proxy-ca.crt
+sudo update-ca-certificates
+```
+
+**macOS (system-wide):**
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.pem
+```
+
+**Windows:**
+```powershell
+Import-Certificate -FilePath ca.pem -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+> **Important:** Only trust this CA on machines you control and for testing/development purposes. Remove it from your trust store when you're done to avoid security risks.
