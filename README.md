@@ -62,6 +62,8 @@ go build -o socks5proxy .
 | `i` | Toggle request interception on/off |
 | `F` (shift+f) | Open filter management dialog |
 | `C` (shift+c) | Clear all intercept filters |
+| `e` | Edit selected awk filter in `$EDITOR`/vim (in filter dialog) |
+| `Ctrl+E` | Compose new awk filter in `$EDITOR`/vim (in filter dialog) |
 | `Ctrl+F` | Forward intercepted request (from editor) |
 | `Ctrl+X` | Drop intercepted connection (from editor) |
 | `d` | Toggle database capture on/off |
@@ -193,6 +195,8 @@ Two filter types are supported: **regex** filters match against a specific field
 **From the TUI:**
 - Press `F` to open the filter management dialog
 - Type a filter in `field:regex`, `awk:expression`, or `awk!:expression` format and press Enter
+- Press `Ctrl+E` in the filter input to compose a new awk filter in `$EDITOR` (defaults to vim) — includes a commented template with variable reference and examples
+- Select an existing awk filter and press `e` to edit it in `$EDITOR`
 - Select a filter and press Enter to delete it
 - Press Escape to close
 - Press `C` to clear all filters

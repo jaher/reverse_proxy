@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,11 +194,11 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 	filterInput.SetLabel("Add filter (field:regex or awk:expr):")
 	filterInput.SetFieldWidth(50)
 	filterInput.SetBorder(true)
-	filterInput.SetTitle(" New Filter ")
+	filterInput.SetTitle(" New Filter (Ctrl+E: compose in $EDITOR) ")
 
 	filterListView := tview.NewList()
 	filterListView.SetBorder(true)
-	filterListView.SetTitle(" Active Filters (Enter=delete, Esc=close) ")
+	filterListView.SetTitle(" Active Filters (Enter=del, e=edit in $EDITOR, Esc=close) ")
 	filterListView.ShowSecondaryText(false)
 
 	filterPane := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -314,7 +317,7 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 		}
 	})
 
-	// Filter list: Enter to delete selected, Esc to close
+	// Filter list: Enter to delete, e to edit in vim, Esc to close
 	filterListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
 		case tcell.KeyEnter:
@@ -330,6 +333,25 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 			return nil
 		case tcell.KeyTab:
 			app.SetFocus(filterInput)
+			return nil
+		case tcell.KeyRune:
+			switch event.Rune() {
+			case 'e':
+				idx := filterListView.GetCurrentItem()
+				filters := ui.Interceptor.Filters()
+				if idx >= 0 && idx < len(filters) && filters[idx].Field == FilterAwk {
+					ui.editAwkFilterInVim(idx)
+				}
+				return nil
+			}
+		}
+		return event
+	})
+
+	// Filter input: Ctrl+E to compose a new awk filter in vim
+	filterInput.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyCtrlE {
+			ui.composeAwkFilterInVim()
 			return nil
 		}
 		return event
@@ -541,6 +563,137 @@ func (ui *UI) rebuildFilterList() {
 			ui.filterList.AddItem(f.String(), "", 0, nil)
 		}
 	}
+}
+
+// openEditorWithContent suspends the TUI, opens $EDITOR (or vim) with content,
+// and returns the edited content.
+func (ui *UI) openEditorWithContent(initial string, fileSuffix string) (string, error) {
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, "socks5proxy-filter"+fileSuffix)
+
+	if err := os.WriteFile(tmpFile, []byte(initial), 0600); err != nil {
+		return "", fmt.Errorf("write temp file: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vim"
+	}
+
+	// Suspend the TUI
+	ui.App.Suspend(func() {
+		cmd := exec.Command(editor, tmpFile)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+	})
+
+	result, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return "", fmt.Errorf("read temp file: %w", err)
+	}
+	return string(result), nil
+}
+
+// editAwkFilterInVim opens the awk expression of an existing filter in vim for editing.
+func (ui *UI) editAwkFilterInVim(index int) {
+	filters := ui.Interceptor.Filters()
+	if index < 0 || index >= len(filters) {
+		return
+	}
+	f := filters[index]
+	if f.Field != FilterAwk {
+		return
+	}
+
+	header := "# Edit awk filter expression below.\n" +
+		"# Available variables: method, url, host, proto, content_type, body_len, headers\n" +
+		"# $0 = full raw request. If awk produces output, the filter matches.\n" +
+		"# Lines starting with # are stripped.\n" +
+		"#\n" +
+		fmt.Sprintf("# Mode: %s\n", map[bool]string{true: "rewrite (awk!:)", false: "match (awk:)"}[f.Rewrite]) +
+		"#\n"
+
+	content, err := ui.openEditorWithContent(header+f.AwkExpr+"\n", ".awk")
+	if err != nil {
+		return
+	}
+
+	// Strip comment lines and trim
+	expr := stripAwkComments(content)
+	if expr == "" || expr == f.AwkExpr {
+		return // no change or empty
+	}
+
+	// Replace the filter
+	ui.Interceptor.RemoveFilter(index)
+	if err := ui.Interceptor.AddAwkFilter(expr, f.Rewrite); err != nil {
+		// Re-add the original on error
+		ui.Interceptor.AddAwkFilter(f.AwkExpr, f.Rewrite)
+		return
+	}
+	// Move the new filter to the original position
+	ui.Interceptor.moveFilterToIndex(len(ui.Interceptor.Filters())-1, index)
+	ui.rebuildFilterList()
+	ui.updateStatusBar()
+}
+
+// composeAwkFilterInVim opens vim with a template for writing a new awk filter.
+func (ui *UI) composeAwkFilterInVim() {
+	header := "# Write an awk filter expression below.\n" +
+		"# Available variables: method, url, host, proto, content_type, body_len, headers\n" +
+		"# $0 = full raw request (each line is a record).\n" +
+		"# If awk produces any output, the filter matches.\n" +
+		"# Lines starting with # are stripped.\n" +
+		"#\n" +
+		"# To make this a rewrite filter (awk!:), add this line:\n" +
+		"# MODE: rewrite\n" +
+		"#\n" +
+		"# Examples:\n" +
+		"#   method == \"POST\" && url ~ /\\/api\\// { print }\n" +
+		"#   /password|token/ { print }\n" +
+		"#   { gsub(/staging/, \"production\"); print }   # (rewrite mode)\n" +
+		"#\n"
+
+	content, err := ui.openEditorWithContent(header, ".awk")
+	if err != nil {
+		return
+	}
+
+	rewrite := false
+	// Check for MODE: rewrite directive
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.EqualFold(trimmed, "# MODE: rewrite") || strings.EqualFold(trimmed, "#MODE: rewrite") {
+			rewrite = true
+		}
+	}
+
+	expr := stripAwkComments(content)
+	if expr == "" {
+		return
+	}
+
+	if err := ui.Interceptor.AddAwkFilter(expr, rewrite); err != nil {
+		return
+	}
+	ui.rebuildFilterList()
+	ui.updateStatusBar()
+}
+
+// stripAwkComments removes comment lines (starting with #) and trims whitespace.
+func stripAwkComments(content string) string {
+	var lines []string
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func (ui *UI) setTableHeaders() {

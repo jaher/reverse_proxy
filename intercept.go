@@ -256,6 +256,20 @@ func (it *Interceptor) RemoveFilter(index int) {
 	}
 }
 
+// moveFilterToIndex moves a filter from one position to another.
+func (it *Interceptor) moveFilterToIndex(from, to int) {
+	it.mu.Lock()
+	defer it.mu.Unlock()
+	if from < 0 || from >= len(it.filters) || to < 0 || to >= len(it.filters) || from == to {
+		return
+	}
+	f := it.filters[from]
+	// Remove from old position
+	it.filters = append(it.filters[:from], it.filters[from+1:]...)
+	// Insert at new position
+	it.filters = append(it.filters[:to], append([]InterceptFilter{f}, it.filters[to:]...)...)
+}
+
 // ClearFilters removes all filters.
 func (it *Interceptor) ClearFilters() {
 	it.mu.Lock()
