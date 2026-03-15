@@ -23,9 +23,12 @@ func main() {
 	caCertPath := flag.String("ca-cert", "ca.pem", "Path to CA certificate file")
 	caKeyPath := flag.String("ca-key", "ca-key.pem", "Path to CA private key file")
 	dbPath := flag.String("db", "", "Path to SQLite database for capturing traffic (e.g. capture.db)")
+	maxCaptureMB := flag.Int("max-capture", 10, "Max payload capture size per direction in MB")
 	var filters filterFlags
 	flag.Var(&filters, "filter", "Intercept filter as field:regex (repeatable). Fields: host, url, method, content-type, body, header, awk, awk!")
 	flag.Parse()
+
+	maxCaptureSize = *maxCaptureMB << 20
 
 	var cfg ProxyConfig
 

@@ -10,7 +10,7 @@ A SOCKS5 proxy with a Burp Suite-style terminal UI for inspecting HTTP/HTTPS tra
 - **HTTP auto-detection**: displays HTTP payloads as readable text, binary as hex
 - **TLS interception**: decrypt and inspect HTTPS traffic with `--tls-intercept` flag
 - **Request interception**: pause, edit, and forward/drop outgoing requests before they reach the server
-- **Payload capture**: up to 1 MB per direction per connection
+- **Payload capture**: up to 10 MB per direction per connection (configurable via `-max-capture`)
 
 ## Building
 
@@ -46,6 +46,7 @@ go build -o socks5proxy .
 | `-ca-cert` | `ca.pem` | Path to CA certificate file |
 | `-ca-key` | `ca-key.pem` | Path to CA private key file |
 | `-db` | `""` | Path to SQLite database for traffic capture (empty = disabled) |
+| `-max-capture` | `10` | Max payload capture size per direction in MB |
 | `-filter` | | Intercept filter as `field:regex`, `awk:expr`, or `awk!:expr` (repeatable, see below) |
 
 ### Keyboard Controls

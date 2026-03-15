@@ -15,7 +15,7 @@ import (
 	"github.com/rivo/tview"
 )
 
-const maxCaptureSize = 1 << 20 // 1 MB per direction
+var maxCaptureSize = 10 << 20 // 10 MB per direction (configurable via -max-capture)
 
 type Connection struct {
 	ID             int
