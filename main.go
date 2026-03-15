@@ -8,12 +8,22 @@ import (
 	"os"
 )
 
+type filterFlags []string
+
+func (f *filterFlags) String() string { return fmt.Sprintf("%v", *f) }
+func (f *filterFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 	port := flag.Int("port", 0, "Port to listen on (0 for random available port)")
 	mitm := flag.Bool("mitm", false, "Enable TLS MITM interception (generates CA cert on first run)")
 	caCertPath := flag.String("ca-cert", "ca.pem", "Path to CA certificate file")
 	caKeyPath := flag.String("ca-key", "ca-key.pem", "Path to CA private key file")
 	dbPath := flag.String("db", "", "Path to SQLite database for capturing traffic (e.g. capture.db)")
+	var filters filterFlags
+	flag.Var(&filters, "filter", "Intercept filter as field:regex (repeatable). Fields: host, url, method, content-type, body, header")
 	flag.Parse()
 
 	var cfg ProxyConfig
@@ -40,6 +50,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Database capture enabled: %s\n", *dbPath)
 	}
 
+	interceptor := NewInterceptor()
+
+	// Load CLI filters
+	for _, spec := range filters {
+		field, pattern, err := ParseFilterSpec(spec)
+		if err != nil {
+			log.Fatalf("Invalid filter %q: %v", spec, err)
+		}
+		if err := interceptor.AddFilter(field, pattern); err != nil {
+			log.Fatalf("Invalid filter regex %q: %v", spec, err)
+		}
+		fmt.Fprintf(os.Stderr, "Intercept filter: %s =~ /%s/\n", field, pattern)
+	}
+
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -49,7 +73,6 @@ func main() {
 
 	listenAddr := listener.Addr().String()
 	store := NewConnectionStore()
-	interceptor := NewInterceptor()
 	ui := NewUI(store, listenAddr, db, interceptor)
 
 	go func() {

@@ -46,6 +46,7 @@ go build -o socks5proxy .
 | `-ca-cert` | `ca.pem` | Path to CA certificate file |
 | `-ca-key` | `ca-key.pem` | Path to CA private key file |
 | `-db` | `""` | Path to SQLite database for traffic capture (empty = disabled) |
+| `-filter` | | Intercept filter as `field:regex` (repeatable, see below) |
 
 ### Keyboard Controls
 
@@ -58,6 +59,8 @@ go build -o socks5proxy .
 | `h` | Headers view |
 | `x` | Hex dump view |
 | `i` | Toggle request interception on/off |
+| `F` (shift+f) | Open filter management dialog |
+| `C` (shift+c) | Clear all intercept filters |
 | `Ctrl+F` | Forward intercepted request (from editor) |
 | `Ctrl+X` | Drop intercepted connection (from editor) |
 | `d` | Toggle database capture on/off |
@@ -137,6 +140,40 @@ Press `i` to toggle intercept mode. When enabled, each new outgoing request is p
 4. Press `Ctrl+X` to drop the connection entirely
 
 Requests queue up while you're editing — the status bar shows how many are waiting. This works with both plain HTTP and TLS-intercepted HTTPS traffic.
+
+### Intercept Filters
+
+By default, intercept mode pauses **all** requests. Use filters to only pause requests matching specific patterns. Filters use regex and are OR'd together (any match triggers interception).
+
+**From the CLI:**
+```bash
+# Only intercept requests to example.com
+./socks5proxy -port 1080 -filter "host:example\.com"
+
+# Only intercept POST requests with JSON bodies
+./socks5proxy -port 1080 -filter "method:POST" -filter "content-type:json"
+
+# Multiple filters (any match pauses the request)
+./socks5proxy -port 1080 -filter "url:/api/login" -filter "body:password"
+```
+
+**From the TUI:**
+- Press `F` to open the filter management dialog
+- Type a filter in `field:regex` format and press Enter
+- Select a filter and press Enter to delete it
+- Press Escape to close
+- Press `C` to clear all filters
+
+**Supported filter fields:**
+
+| Field | Matches against |
+|-------|----------------|
+| `host` | Destination host:port (e.g. `example.com:443`) |
+| `url` / `path` | Request URL path (e.g. `/api/users`) |
+| `method` | HTTP method (GET, POST, PUT, etc.) |
+| `content-type` / `ct` / `mime` | Content-Type header value |
+| `body` | Request body content |
+| `header` / `headers` | All headers concatenated |
 
 ## Database Capture
 

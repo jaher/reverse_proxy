@@ -131,6 +131,13 @@ type UI struct {
 	statusBar   *tview.TextView
 	bottomPane  *tview.Flex
 
+	// Filter management
+	filterInput *tview.InputField
+	filterList  *tview.List
+	filterPane  *tview.Flex
+	mainLayout  *tview.Flex
+	pages       *tview.Pages
+
 	// State
 	viewMode    viewTab
 	fmtMode     formatTab
@@ -141,6 +148,7 @@ type UI struct {
 	db          *DB
 	listenAddr  string
 	editing     bool
+	showingFilters bool
 	currentIntercept *InterceptRequest
 
 	refreshMu   sync.Mutex
@@ -177,6 +185,24 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 	statusBar := tview.NewTextView()
 	statusBar.SetDynamicColors(true)
 
+	// Filter management UI
+	filterInput := tview.NewInputField()
+	filterInput.SetLabel("Add filter (field:regex): ")
+	filterInput.SetFieldWidth(50)
+	filterInput.SetBorder(true)
+	filterInput.SetTitle(" New Filter ")
+
+	filterListView := tview.NewList()
+	filterListView.SetBorder(true)
+	filterListView.SetTitle(" Active Filters (Enter=delete, Esc=close) ")
+	filterListView.ShowSecondaryText(false)
+
+	filterPane := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(filterInput, 3, 0, true).
+		AddItem(filterListView, 0, 1, false)
+
+	pages := tview.NewPages()
+
 	ui := &UI{
 		App:         app,
 		Store:       store,
@@ -187,6 +213,10 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 		detail:      detail,
 		editor:      editor,
 		statusBar:   statusBar,
+		filterInput: filterInput,
+		filterList:  filterListView,
+		filterPane:  filterPane,
+		pages:       pages,
 		viewMode:    tabRequest,
 		fmtMode:     fmtRaw,
 		db:          db,
@@ -229,14 +259,80 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 		AddItem(topPane, 0, 1, true).
 		AddItem(bottomPane, 0, 1, false).
 		AddItem(statusBar, 1, 0, false)
+	ui.mainLayout = mainLayout
 
-	app.SetRoot(mainLayout, true)
+	pages.AddPage("main", mainLayout, true, true)
+	pages.AddPage("filters", tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(filterPane, 15, 0, true).
+			AddItem(nil, 0, 1, false),
+			60, 0, true).
+		AddItem(nil, 0, 1, false),
+		true, false)
+
+	app.SetRoot(pages, true)
+
+	// Filter input: when user presses Enter, add the filter
+	filterInput.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEnter {
+			spec := filterInput.GetText()
+			if spec != "" {
+				field, pattern, err := ParseFilterSpec(spec)
+				if err != nil {
+					filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
+				} else {
+					if err := ui.Interceptor.AddFilter(field, pattern); err != nil {
+						filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
+					} else {
+						filterInput.SetText("")
+						filterInput.SetLabel("Add filter (field:regex): ")
+						ui.rebuildFilterList()
+						ui.updateStatusBar()
+					}
+				}
+			}
+		} else if key == tcell.KeyEscape {
+			ui.hideFilters()
+		}
+	})
+
+	// Filter list: Enter to delete selected, Esc to close
+	filterListView.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEnter:
+			idx := filterListView.GetCurrentItem()
+			if idx >= 0 {
+				ui.Interceptor.RemoveFilter(idx)
+				ui.rebuildFilterList()
+				ui.updateStatusBar()
+			}
+			return nil
+		case tcell.KeyEscape:
+			ui.hideFilters()
+			return nil
+		case tcell.KeyTab:
+			app.SetFocus(filterInput)
+			return nil
+		}
+		return event
+	})
 
 	// Focus cycling: hostList -> reqTable -> detail
 	focusOrder := []tview.Primitive{hostList, reqTable, detail}
 	focusIdx := 0
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// When filter modal is open, Escape closes it
+		if ui.showingFilters {
+			if event.Key() == tcell.KeyEscape {
+				ui.hideFilters()
+				return nil
+			}
+			return event
+		}
+
 		// When editing an intercepted request, only handle editor keys
 		if ui.editing {
 			switch event.Key() {
@@ -307,8 +403,14 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 				}
 				return nil
 			case 'i':
-				enabled := ui.Interceptor.Toggle()
-				_ = enabled
+				ui.Interceptor.Toggle()
+				ui.updateStatusBar()
+				return nil
+			case 'F':
+				ui.showFilters()
+				return nil
+			case 'C':
+				ui.Interceptor.ClearFilters()
 				ui.updateStatusBar()
 				return nil
 			}
@@ -392,6 +494,39 @@ func (ui *UI) dropIntercept() {
 	ui.hideEditor()
 }
 
+// showFilters opens the filter management modal.
+func (ui *UI) showFilters() {
+	if ui.editing {
+		return
+	}
+	ui.showingFilters = true
+	ui.filterInput.SetText("")
+	ui.filterInput.SetLabel("Add filter (field:regex): ")
+	ui.rebuildFilterList()
+	ui.pages.ShowPage("filters")
+	ui.App.SetFocus(ui.filterInput)
+}
+
+// hideFilters closes the filter management modal.
+func (ui *UI) hideFilters() {
+	ui.showingFilters = false
+	ui.pages.HidePage("filters")
+	ui.App.SetFocus(ui.reqTable)
+}
+
+// rebuildFilterList refreshes the filter list widget.
+func (ui *UI) rebuildFilterList() {
+	ui.filterList.Clear()
+	filters := ui.Interceptor.Filters()
+	if len(filters) == 0 {
+		ui.filterList.AddItem("(no filters — all requests intercepted)", "", 0, nil)
+	} else {
+		for _, f := range filters {
+			ui.filterList.AddItem(f.String(), "", 0, nil)
+		}
+	}
+}
+
 func (ui *UI) setTableHeaders() {
 	headers := []string{"#", "Host", "Method", "URL", "Status", "Length", "MIME", "TLS"}
 	for i, h := range headers {
@@ -430,9 +565,15 @@ func (ui *UI) updateStatusBar() {
 		interceptStatus += fmt.Sprintf(" [yellow](%d queued)[white]", qLen)
 	}
 
+	filterCount := len(ui.Interceptor.Filters())
+	filterStatus := ""
+	if filterCount > 0 {
+		filterStatus = fmt.Sprintf("  [yellow]Filters:[aqua] %d[white]", filterCount)
+	}
+
 	ui.statusBar.SetText(fmt.Sprintf(
-		" [yellow]Listening:[white] %s%s  [yellow]Intercept:[white]%s  [yellow]i:[white] toggle  [yellow]1/2:[white] Req/Resp  [yellow]r/h/x:[white] Raw/Headers/Hex  [yellow]d:[white] DB  [yellow]q:[white] quit",
-		ui.listenAddr, dbStatus, interceptStatus,
+		" [yellow]Listening:[white] %s%s  [yellow]Intercept:[white]%s%s  [yellow]i:[white] toggle  [yellow]F:[white] filters  [yellow]C:[white] clear  [yellow]q:[white] quit",
+		ui.listenAddr, dbStatus, interceptStatus, filterStatus,
 	))
 }
 

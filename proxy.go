@@ -253,6 +253,24 @@ relay:
 	if ui.Interceptor.IsEnabled() {
 		firstBuf := make([]byte, 65536)
 		n, readErr := clientReader.Read(firstBuf)
+		if n > 0 && !ui.Interceptor.ShouldIntercept(connRecord, firstBuf[:n]) {
+			// Doesn't match filters — forward without pausing
+			if _, err := c2s.Write(firstBuf[:n]); err != nil {
+				connRecord.mu.Lock()
+				connRecord.Status = "FAILED"
+				connRecord.mu.Unlock()
+				ui.RefreshList()
+				return
+			}
+			if readErr != nil {
+				connRecord.mu.Lock()
+				connRecord.Status = "CLOSED"
+				connRecord.mu.Unlock()
+				ui.RefreshList()
+				return
+			}
+			goto startRelay
+		}
 		if n > 0 {
 			data, forward := ui.Interceptor.Submit(connRecord, firstBuf[:n])
 			if !forward {
@@ -280,6 +298,7 @@ relay:
 		}
 	}
 
+startRelay:
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(c2s, clientReader)
