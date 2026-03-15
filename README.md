@@ -28,6 +28,12 @@ go build -o socks5proxy .
 
 # Enable TLS interception
 ./socks5proxy -port 1080 -mitm
+
+# Enable database capture
+./socks5proxy -port 1080 -db capture.db
+
+# All features
+./socks5proxy -port 1080 -mitm -db capture.db
 ```
 
 ### Flags
@@ -38,6 +44,7 @@ go build -o socks5proxy .
 | `-mitm` | `false` | Enable TLS MITM interception |
 | `-ca-cert` | `ca.pem` | Path to CA certificate file |
 | `-ca-key` | `ca-key.pem` | Path to CA private key file |
+| `-db` | `""` | Path to SQLite database for traffic capture (empty = disabled) |
 
 ### Keyboard Controls
 
@@ -49,6 +56,8 @@ go build -o socks5proxy .
 | `r` | Raw view (human-readable text) |
 | `h` | Headers view |
 | `x` | Hex dump view |
+| `d` | Toggle database capture on/off |
+| `S` (shift+s) | Save all closed connections to database |
 | `q` | Quit |
 
 ## Testing with curl
@@ -113,3 +122,40 @@ Import-Certificate -FilePath ca.pem -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
 > **Important:** Only trust this CA on machines you control and for testing/development purposes. Remove it from your trust store when you're done to avoid security risks.
+
+## Database Capture
+
+When started with `-db capture.db`, all completed connections are automatically saved to a SQLite database. You can toggle capture on/off at runtime with `d`, or manually save all closed connections with `S`.
+
+### Schema
+
+```sql
+CREATE TABLE connections (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy_id        INTEGER NOT NULL,
+    target          TEXT NOT NULL,
+    client_addr     TEXT NOT NULL,
+    start_time      DATETIME NOT NULL,
+    end_time        DATETIME,
+    status          TEXT NOT NULL,
+    tls_intercepted BOOLEAN NOT NULL DEFAULT 0,
+    request_data    BLOB,
+    response_data   BLOB
+);
+```
+
+### Querying captured data
+
+```bash
+# List all captured connections
+sqlite3 capture.db "SELECT id, target, status, length(request_data), length(response_data) FROM connections;"
+
+# View a specific request payload as text
+sqlite3 capture.db "SELECT CAST(request_data AS TEXT) FROM connections WHERE id = 1;"
+
+# View a specific response payload as text
+sqlite3 capture.db "SELECT CAST(response_data AS TEXT) FROM connections WHERE id = 1;"
+
+# Find requests to a specific host
+sqlite3 capture.db "SELECT * FROM connections WHERE target LIKE '%example.com%';"
+```

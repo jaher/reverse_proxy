@@ -135,12 +135,14 @@ type UI struct {
 	hosts      []string
 	selHost    string // "" means all
 	filtered   []*Connection
+	db         *DB
+	listenAddr string
 
 	refreshMu   sync.Mutex
 	lastRefresh time.Time
 }
 
-func NewUI(store *ConnectionStore, listenAddr string) *UI {
+func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 	app := tview.NewApplication()
 
 	hostList := tview.NewList()
@@ -165,18 +167,19 @@ func NewUI(store *ConnectionStore, listenAddr string) *UI {
 
 	statusBar := tview.NewTextView()
 	statusBar.SetDynamicColors(true)
-	statusBar.SetText(fmt.Sprintf(" [yellow]Listening:[white] %s  [yellow]Tab:[white] switch pane  [yellow]1/2:[white] Req/Resp  [yellow]r/h/x:[white] Raw/Headers/Hex  [yellow]q:[white] quit", listenAddr))
 
 	ui := &UI{
-		App:      app,
-		Store:    store,
-		hostList: hostList,
-		reqTable: reqTable,
-		tabBar:   tabBar,
-		detail:   detail,
-		statusBar: statusBar,
-		viewMode: tabRequest,
-		fmtMode:  fmtRaw,
+		App:        app,
+		Store:      store,
+		hostList:   hostList,
+		reqTable:   reqTable,
+		tabBar:     tabBar,
+		detail:     detail,
+		statusBar:  statusBar,
+		viewMode:   tabRequest,
+		fmtMode:    fmtRaw,
+		db:         db,
+		listenAddr: listenAddr,
 	}
 
 	// Table header
@@ -262,12 +265,30 @@ func NewUI(store *ConnectionStore, listenAddr string) *UI {
 				ui.updateTabBar()
 				ui.updateDetail()
 				return nil
+			case 'd':
+				if ui.db != nil {
+					enabled := ui.db.Toggle()
+					_ = enabled
+					ui.updateStatusBar()
+				}
+				return nil
+			case 'S':
+				if ui.db != nil {
+					saved, err := ui.db.SaveAllConnections(ui.Store)
+					if err != nil {
+						ui.statusBar.SetText(fmt.Sprintf(" [red]DB error: %v", err))
+					} else {
+						ui.statusBar.SetText(fmt.Sprintf(" [green]Saved %d connections to %s", saved, ui.db.Path()))
+					}
+				}
+				return nil
 			}
 		}
 		return event
 	})
 
 	ui.updateTabBar()
+	ui.updateStatusBar()
 
 	return ui
 }
@@ -286,6 +307,21 @@ func (ui *UI) setTableHeaders() {
 		}
 		ui.reqTable.SetCell(0, i, cell)
 	}
+}
+
+func (ui *UI) updateStatusBar() {
+	dbStatus := ""
+	if ui.db != nil {
+		if ui.db.IsEnabled() {
+			dbStatus = fmt.Sprintf("  [green]DB: ON[white] (%s)", ui.db.Path())
+		} else {
+			dbStatus = "  [red]DB: OFF[white]"
+		}
+	}
+	ui.statusBar.SetText(fmt.Sprintf(
+		" [yellow]Listening:[white] %s%s  [yellow]Tab:[white] pane  [yellow]1/2:[white] Req/Resp  [yellow]r/h/x:[white] Raw/Headers/Hex  [yellow]d:[white] toggle DB  [yellow]S:[white] save all  [yellow]q:[white] quit",
+		ui.listenAddr, dbStatus,
+	))
 }
 
 func (ui *UI) updateTabBar() {

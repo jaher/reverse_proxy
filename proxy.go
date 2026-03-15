@@ -36,6 +36,7 @@ const (
 type ProxyConfig struct {
 	CertCache   *CertCache
 	MITMEnabled bool
+	DB          *DB
 }
 
 type CaptureWriter struct {
@@ -263,6 +264,12 @@ relay:
 	connRecord.mu.Lock()
 	connRecord.Status = "CLOSED"
 	connRecord.mu.Unlock()
+
+	// Save to database if enabled
+	if cfg.DB != nil {
+		cfg.DB.SaveConnection(connRecord)
+	}
+
 	ui.RefreshList()
 }
 

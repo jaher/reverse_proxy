@@ -13,6 +13,7 @@ func main() {
 	mitm := flag.Bool("mitm", false, "Enable TLS MITM interception (generates CA cert on first run)")
 	caCertPath := flag.String("ca-cert", "ca.pem", "Path to CA certificate file")
 	caKeyPath := flag.String("ca-key", "ca-key.pem", "Path to CA private key file")
+	dbPath := flag.String("db", "", "Path to SQLite database for capturing traffic (e.g. capture.db)")
 	flag.Parse()
 
 	var cfg ProxyConfig
@@ -27,6 +28,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "TLS MITM enabled. Trust the CA certificate: %s\n", *caCertPath)
 	}
 
+	var db *DB
+	if *dbPath != "" {
+		var err error
+		db, err = OpenDB(*dbPath)
+		if err != nil {
+			log.Fatalf("Failed to open database: %v", err)
+		}
+		defer db.Close()
+		cfg.DB = db
+		fmt.Fprintf(os.Stderr, "Database capture enabled: %s\n", *dbPath)
+	}
+
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -36,7 +49,7 @@ func main() {
 
 	listenAddr := listener.Addr().String()
 	store := NewConnectionStore()
-	ui := NewUI(store, listenAddr)
+	ui := NewUI(store, listenAddr, db)
 
 	go func() {
 		for {
