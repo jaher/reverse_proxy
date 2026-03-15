@@ -88,17 +88,14 @@ func (f *InterceptFilter) MatchRegex(value string) bool {
 
 // RunAwk executes the awk expression against request data.
 // Returns (output, matched). Output is the awk stdout; matched is true if any output was produced.
-// If sandbox is true, awk is run with --sandbox to disable system(), pipes, and I/O redirection.
-func (f *InterceptFilter) RunAwk(conn *Connection, data []byte, parsed *ParsedHTTP, sandbox bool) ([]byte, bool) {
+// Awk is always run with --sandbox to disable system(), pipes, and I/O redirection.
+func (f *InterceptFilter) RunAwk(conn *Connection, data []byte, parsed *ParsedHTTP) ([]byte, bool) {
 	if f.AwkExpr == "" {
 		return nil, false
 	}
 
 	vars := buildAwkVars(conn, data, parsed)
-	var args []string
-	if sandbox {
-		args = append(args, "--sandbox")
-	}
+	args := []string{"--sandbox"}
 	args = append(args, vars...)
 	args = append(args, f.AwkExpr)
 
@@ -165,17 +162,15 @@ type FilterResult struct {
 
 // Interceptor manages the intercept toggle, filters, and pending request queue.
 type Interceptor struct {
-	mu         sync.Mutex
-	enabled    bool
-	filters    []InterceptFilter
-	queue      chan *InterceptRequest
-	AwkSandbox bool // if true, run awk with --sandbox (disables system(), pipes, I/O redirection)
+	mu      sync.Mutex
+	enabled bool
+	filters []InterceptFilter
+	queue   chan *InterceptRequest
 }
 
 func NewInterceptor() *Interceptor {
 	return &Interceptor{
-		queue:      make(chan *InterceptRequest, 64),
-		AwkSandbox: true, // safe by default
+		queue: make(chan *InterceptRequest, 64),
 	}
 }
 
@@ -218,16 +213,10 @@ func (it *Interceptor) AddFilter(field FilterField, pattern string) error {
 // If rewrite is true, the awk output replaces the request data and auto-forwards.
 // If rewrite is false, a match just pauses for manual editing (like regex filters).
 func (it *Interceptor) AddAwkFilter(expr string, rewrite bool) error {
-	// Validate syntax by running awk with empty input
+	// Validate syntax by running awk with empty input (always sandboxed)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	args := []string{}
-	it.mu.Lock()
-	if it.AwkSandbox {
-		args = append(args, "--sandbox")
-	}
-	it.mu.Unlock()
-	args = append(args, expr)
+	args := []string{"--sandbox", expr}
 	cmd := exec.CommandContext(ctx, "awk", args...)
 	cmd.Stdin = strings.NewReader("")
 	if err := cmd.Run(); err != nil {
@@ -304,10 +293,6 @@ func (it *Interceptor) ProcessFilters(conn *Connection, data []byte) FilterResul
 		return FilterResult{Matched: true}
 	}
 
-	it.mu.Lock()
-	sandbox := it.AwkSandbox
-	it.mu.Unlock()
-
 	parsed := ParseHTTPRequest(data)
 	anyMatch := false
 
@@ -315,7 +300,7 @@ func (it *Interceptor) ProcessFilters(conn *Connection, data []byte) FilterResul
 		f := &filters[i]
 
 		if f.Field == FilterAwk {
-			output, matched := f.RunAwk(conn, data, parsed, sandbox)
+			output, matched := f.RunAwk(conn, data, parsed)
 			if matched {
 				if f.Rewrite {
 					return FilterResult{

@@ -8,7 +8,7 @@ A SOCKS5 proxy with a Burp Suite-style terminal UI for inspecting HTTP/HTTPS tra
 - **Burp-style TUI**: host sidebar, HTTP history table, request/response detail pane
 - **Multiple view modes**: Raw (human-readable text), Headers, and Hex dump
 - **HTTP auto-detection**: displays HTTP payloads as readable text, binary as hex
-- **TLS MITM interception**: decrypt and inspect HTTPS traffic with `--mitm` flag
+- **TLS interception**: decrypt and inspect HTTPS traffic with `--tls-intercept` flag
 - **Request interception**: pause, edit, and forward/drop outgoing requests before they reach the server
 - **Payload capture**: up to 1 MB per direction per connection
 
@@ -28,13 +28,13 @@ go build -o socks5proxy .
 ./socks5proxy -port 1080
 
 # Enable TLS interception
-./socks5proxy -port 1080 -mitm
+./socks5proxy -port 1080 -tls-intercept
 
 # Enable database capture
 ./socks5proxy -port 1080 -db capture.db
 
 # All features
-./socks5proxy -port 1080 -mitm -db capture.db
+./socks5proxy -port 1080 -tls-intercept -db capture.db
 ```
 
 ### Flags
@@ -42,12 +42,11 @@ go build -o socks5proxy .
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-port` | `0` | Port to listen on (0 = random) |
-| `-mitm` | `false` | Enable TLS MITM interception |
+| `-tls-intercept` | `false` | Enable TLS interception |
 | `-ca-cert` | `ca.pem` | Path to CA certificate file |
 | `-ca-key` | `ca-key.pem` | Path to CA private key file |
 | `-db` | `""` | Path to SQLite database for traffic capture (empty = disabled) |
 | `-filter` | | Intercept filter as `field:regex`, `awk:expr`, or `awk!:expr` (repeatable, see below) |
-| `-awk-no-sandbox` | `false` | Disable awk sandbox (allows `system()`, pipes, I/O redirection) |
 
 ### Keyboard Controls
 
@@ -76,7 +75,7 @@ go build -o socks5proxy .
 # Plain HTTP
 curl --socks5 127.0.0.1:1080 http://example.com
 
-# HTTPS with MITM (trust the generated CA for this request)
+# HTTPS with TLS interception (trust the generated CA for this request)
 curl --socks5 127.0.0.1:1080 --cacert ca.pem https://example.com
 ```
 
@@ -101,7 +100,7 @@ export ALL_PROXY=socks5://127.0.0.1:1080
 
 ### Trusting the CA certificate for HTTPS interception
 
-When using `--mitm`, the proxy generates a CA certificate (`ca.pem`) on first run. Browsers will show certificate warnings because they don't trust this CA. To fix this, import the CA into your browser or OS trust store.
+When using `--tls-intercept`, the proxy generates a CA certificate (`ca.pem`) on first run. Browsers will show certificate warnings because they don't trust this CA. To fix this, import the CA into your browser or OS trust store.
 
 **Firefox:**
 1. Go to Settings > Privacy & Security > Certificates > View Certificates
@@ -229,18 +228,12 @@ The awk expression receives the full raw request on stdin. If awk produces **any
 
 ### Awk Security (Sandbox)
 
-By default, awk filters run with `--sandbox` mode (GNU awk), which disables:
+All awk filters run with `--sandbox` mode (GNU awk), which disables:
 - `system()` calls
 - Piping to/from shell commands (`|`, `|&`)
 - I/O redirection (`>`, `>>`, `<`)
 
-This prevents malicious request content from exploiting awk to execute arbitrary commands. If you need these features (e.g., for logging to files), disable the sandbox:
-
-```bash
-./socks5proxy -port 1080 -awk-no-sandbox -filter 'awk!:...'
-```
-
-> **Warning:** Only disable the sandbox when you trust the traffic source. Crafted request payloads could exploit awk `system()` calls if sandboxing is off.
+This prevents malicious request content from exploiting awk to execute arbitrary commands on the proxy host.
 
 ## Database Capture
 
