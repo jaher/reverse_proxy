@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -283,11 +284,17 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 				if err != nil {
 					filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
 				} else if field == FilterAwk {
-					if err := ui.Interceptor.AddAwkFilter(pattern); err != nil {
+					rewrite := false
+					expr := pattern
+					if strings.HasPrefix(pattern, "!") {
+						rewrite = true
+						expr = pattern[1:]
+					}
+					if err := ui.Interceptor.AddAwkFilter(expr, rewrite); err != nil {
 						filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
 					} else {
 						filterInput.SetText("")
-						filterInput.SetLabel("Add filter (field:regex or awk:expr): ")
+						filterInput.SetLabel("Add filter (field:regex, awk:expr, or awk!:expr): ")
 						ui.rebuildFilterList()
 						ui.updateStatusBar()
 					}

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 )
 
 type filterFlags []string
@@ -23,7 +24,8 @@ func main() {
 	caKeyPath := flag.String("ca-key", "ca-key.pem", "Path to CA private key file")
 	dbPath := flag.String("db", "", "Path to SQLite database for capturing traffic (e.g. capture.db)")
 	var filters filterFlags
-	flag.Var(&filters, "filter", "Intercept filter as field:regex (repeatable). Fields: host, url, method, content-type, body, header")
+	flag.Var(&filters, "filter", "Intercept filter as field:regex (repeatable). Fields: host, url, method, content-type, body, header, awk, awk!")
+	awkNoSandbox := flag.Bool("awk-no-sandbox", false, "Disable awk --sandbox mode (allows system(), pipes, I/O redirection in awk filters)")
 	flag.Parse()
 
 	var cfg ProxyConfig
@@ -51,6 +53,10 @@ func main() {
 	}
 
 	interceptor := NewInterceptor()
+	if *awkNoSandbox {
+		interceptor.AwkSandbox = false
+		fmt.Fprintf(os.Stderr, "WARNING: awk sandbox disabled — awk filters can execute system commands\n")
+	}
 
 	// Load CLI filters
 	for _, spec := range filters {
@@ -59,10 +65,20 @@ func main() {
 			log.Fatalf("Invalid filter %q: %v", spec, err)
 		}
 		if field == FilterAwk {
-			if err := interceptor.AddAwkFilter(pattern); err != nil {
+			rewrite := false
+			expr := pattern
+			if strings.HasPrefix(pattern, "!") {
+				rewrite = true
+				expr = pattern[1:]
+			}
+			if err := interceptor.AddAwkFilter(expr, rewrite); err != nil {
 				log.Fatalf("Invalid awk filter %q: %v", spec, err)
 			}
-			fmt.Fprintf(os.Stderr, "Intercept filter: awk { %s }\n", pattern)
+			mode := "match"
+			if rewrite {
+				mode = "rewrite"
+			}
+			fmt.Fprintf(os.Stderr, "Intercept filter: awk[%s] { %s }\n", mode, expr)
 		} else {
 			if err := interceptor.AddFilter(field, pattern); err != nil {
 				log.Fatalf("Invalid filter regex %q: %v", spec, err)

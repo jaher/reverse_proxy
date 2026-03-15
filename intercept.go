@@ -58,22 +58,27 @@ func (f FilterField) String() string {
 	return "unknown"
 }
 
-// InterceptFilter is a single match rule — either regex-based or awk-based.
+// InterceptFilter is a single match rule — regex-based or awk-based.
 type InterceptFilter struct {
 	Field   FilterField
 	Pattern *regexp.Regexp // nil for awk filters
 	AwkExpr string        // non-empty for awk filters
-	Raw     string        // original pattern/expression string for display
+	Rewrite bool          // if true, awk output replaces the request data (auto-forward)
+	Raw     string        // original pattern/expression for display
 }
 
 func (f *InterceptFilter) String() string {
 	if f.Field == FilterAwk {
-		return fmt.Sprintf("awk { %s }", f.Raw)
+		mode := "match"
+		if f.Rewrite {
+			mode = "rewrite"
+		}
+		return fmt.Sprintf("awk[%s] { %s }", mode, f.Raw)
 	}
 	return fmt.Sprintf("%s =~ /%s/", f.Field, f.Raw)
 }
 
-// MatchRegex tests the filter against a string value (for non-awk filters).
+// MatchRegex tests the filter against a string value.
 func (f *InterceptFilter) MatchRegex(value string) bool {
 	if f.Pattern == nil {
 		return false
@@ -81,16 +86,43 @@ func (f *InterceptFilter) MatchRegex(value string) bool {
 	return f.Pattern.MatchString(value)
 }
 
-// MatchAwk runs the awk expression against the request data.
-// Available awk variables: method, url, host, content_type, body_len, status, proto.
-// $0 is the full raw request. Each line of the request is a record.
-// If awk produces any output, the filter matches.
-func (f *InterceptFilter) MatchAwk(conn *Connection, data []byte, parsed *ParsedHTTP) bool {
+// RunAwk executes the awk expression against request data.
+// Returns (output, matched). Output is the awk stdout; matched is true if any output was produced.
+// If sandbox is true, awk is run with --sandbox to disable system(), pipes, and I/O redirection.
+func (f *InterceptFilter) RunAwk(conn *Connection, data []byte, parsed *ParsedHTTP, sandbox bool) ([]byte, bool) {
 	if f.AwkExpr == "" {
-		return false
+		return nil, false
 	}
 
-	// Build awk variables from parsed HTTP
+	vars := buildAwkVars(conn, data, parsed)
+	var args []string
+	if sandbox {
+		args = append(args, "--sandbox")
+	}
+	args = append(args, vars...)
+	args = append(args, f.AwkExpr)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "awk", args...)
+	cmd.Stdin = bytes.NewReader(data)
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = nil
+
+	if err := cmd.Run(); err != nil {
+		return nil, false
+	}
+
+	if stdout.Len() == 0 {
+		return nil, false
+	}
+	return stdout.Bytes(), true
+}
+
+func buildAwkVars(conn *Connection, data []byte, parsed *ParsedHTTP) []string {
 	vars := []string{}
 	addVar := func(name, value string) {
 		vars = append(vars, "-v", fmt.Sprintf("%s=%s", name, value))
@@ -104,7 +136,6 @@ func (f *InterceptFilter) MatchAwk(conn *Connection, data []byte, parsed *Parsed
 		addVar("content_type", parsed.Header("Content-Type"))
 		addVar("body_len", strconv.Itoa(len(parsed.Body)))
 
-		// All headers as a single newline-delimited string
 		var hdrs strings.Builder
 		for _, h := range parsed.Headers {
 			hdrs.WriteString(h[0])
@@ -122,40 +153,29 @@ func (f *InterceptFilter) MatchAwk(conn *Connection, data []byte, parsed *Parsed
 		addVar("headers", "")
 	}
 
-	// Build: awk -v method=... -v url=... 'expression' <<< data
-	args := append(vars, f.AwkExpr)
+	return vars
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "awk", args...)
-	cmd.Stdin = bytes.NewReader(data)
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = nil
-
-	err := cmd.Run()
-	if err != nil {
-		// awk exited non-zero or timed out — no match
-		return false
-	}
-
-	// If awk produced any output, the filter matches
-	return stdout.Len() > 0
+// FilterResult describes how a request should be handled after filter evaluation.
+type FilterResult struct {
+	Matched      bool   // at least one filter matched
+	Rewritten    bool   // an awk rewrite filter produced replacement data
+	RewriteData  []byte // the replacement data (only if Rewritten)
 }
 
 // Interceptor manages the intercept toggle, filters, and pending request queue.
 type Interceptor struct {
-	mu      sync.Mutex
-	enabled bool
-	filters []InterceptFilter
-	queue   chan *InterceptRequest
+	mu         sync.Mutex
+	enabled    bool
+	filters    []InterceptFilter
+	queue      chan *InterceptRequest
+	AwkSandbox bool // if true, run awk with --sandbox (disables system(), pipes, I/O redirection)
 }
 
 func NewInterceptor() *Interceptor {
 	return &Interceptor{
-		queue: make(chan *InterceptRequest, 64),
+		queue:      make(chan *InterceptRequest, 64),
+		AwkSandbox: true, // safe by default
 	}
 }
 
@@ -194,19 +214,26 @@ func (it *Interceptor) AddFilter(field FilterField, pattern string) error {
 	return nil
 }
 
-// AddAwkFilter adds an awk-based intercept filter.
-func (it *Interceptor) AddAwkFilter(expr string) error {
-	// Validate by running awk with empty input
+// AddAwkFilter adds an awk-based filter.
+// If rewrite is true, the awk output replaces the request data and auto-forwards.
+// If rewrite is false, a match just pauses for manual editing (like regex filters).
+func (it *Interceptor) AddAwkFilter(expr string, rewrite bool) error {
+	// Validate syntax by running awk with empty input
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "awk", expr)
+	args := []string{}
+	it.mu.Lock()
+	if it.AwkSandbox {
+		args = append(args, "--sandbox")
+	}
+	it.mu.Unlock()
+	args = append(args, expr)
+	cmd := exec.CommandContext(ctx, "awk", args...)
 	cmd.Stdin = strings.NewReader("")
 	if err := cmd.Run(); err != nil {
-		// Check if it's a syntax error vs just no match
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
 			return fmt.Errorf("awk syntax error in %q", expr)
 		}
-		// Exit code 1 is fine (no match on empty input)
 	}
 
 	it.mu.Lock()
@@ -214,6 +241,7 @@ func (it *Interceptor) AddAwkFilter(expr string) error {
 	it.filters = append(it.filters, InterceptFilter{
 		Field:   FilterAwk,
 		AwkExpr: expr,
+		Rewrite: rewrite,
 		Raw:     expr,
 	})
 	return nil
@@ -244,27 +272,45 @@ func (it *Interceptor) Filters() []InterceptFilter {
 	return result
 }
 
-// ShouldIntercept checks whether a request matches the filter rules.
-// If no filters are set, all requests are intercepted.
-// If filters are set, at least one must match (OR logic).
-func (it *Interceptor) ShouldIntercept(conn *Connection, data []byte) bool {
+// ProcessFilters evaluates all filters against the request.
+// Returns a FilterResult describing the outcome:
+//   - No filters: Matched=true (intercept everything)
+//   - Awk rewrite filter matched: Matched=true, Rewritten=true, RewriteData=awk output
+//   - Regex or awk match filter: Matched=true, Rewritten=false (pause for editing)
+//   - No filter matched: Matched=false
+//
+// Rewrite filters take priority: if one matches, its output is used immediately.
+func (it *Interceptor) ProcessFilters(conn *Connection, data []byte) FilterResult {
 	it.mu.Lock()
 	filters := make([]InterceptFilter, len(it.filters))
 	copy(filters, it.filters)
 	it.mu.Unlock()
 
 	if len(filters) == 0 {
-		return true
+		return FilterResult{Matched: true}
 	}
 
+	it.mu.Lock()
+	sandbox := it.AwkSandbox
+	it.mu.Unlock()
+
 	parsed := ParseHTTPRequest(data)
+	anyMatch := false
 
 	for i := range filters {
 		f := &filters[i]
 
 		if f.Field == FilterAwk {
-			if f.MatchAwk(conn, data, parsed) {
-				return true
+			output, matched := f.RunAwk(conn, data, parsed, sandbox)
+			if matched {
+				if f.Rewrite {
+					return FilterResult{
+						Matched:     true,
+						Rewritten:   true,
+						RewriteData: output,
+					}
+				}
+				anyMatch = true
 			}
 			continue
 		}
@@ -307,11 +353,11 @@ func (it *Interceptor) ShouldIntercept(conn *Connection, data []byte) bool {
 		}
 
 		if f.MatchRegex(value) {
-			return true
+			anyMatch = true
 		}
 	}
 
-	return false
+	return FilterResult{Matched: anyMatch}
 }
 
 // Submit sends a request for interception and blocks until the UI responds.
@@ -340,17 +386,26 @@ func (it *Interceptor) QueueLen() int {
 
 // ParseFilterSpec parses a filter specification string.
 //
-// Regex filters:  field:pattern       e.g. host:example\.com
-// Awk filters:    awk:expression      e.g. awk:method == "POST" && url ~ /login/
+// Regex filters:   field:pattern          e.g. host:example\.com
+// Awk match:       awk:expression         e.g. awk:method == "POST" && url ~ /login/
+// Awk rewrite:     awk!:expression        e.g. awk!:{ gsub(/staging/, "prod"); print }
 //
-// The awk expression receives the raw request on stdin and has these variables:
-//   method, url, host, proto, content_type, body_len, headers
-//
-// If the awk expression prints any output, the filter matches.
+// awk: filters pause matching requests for manual editing.
+// awk!: filters auto-rewrite: awk output replaces the request and forwards immediately.
 func ParseFilterSpec(spec string) (FilterField, string, error) {
+	// Check for awk!: prefix (rewrite mode) before splitting
+	if strings.HasPrefix(spec, "awk!:") {
+		pattern := strings.TrimSpace(spec[5:])
+		if pattern == "" {
+			return 0, "", fmt.Errorf("awk!: requires an expression")
+		}
+		// We'll use a special marker to distinguish rewrite from match
+		return FilterAwk, "!" + pattern, nil
+	}
+
 	parts := strings.SplitN(spec, ":", 2)
 	if len(parts) != 2 || parts[1] == "" {
-		return 0, "", fmt.Errorf("format must be field:pattern or awk:expression")
+		return 0, "", fmt.Errorf("format must be field:pattern, awk:expression, or awk!:expression")
 	}
 
 	field := strings.TrimSpace(strings.ToLower(parts[0]))
@@ -372,6 +427,6 @@ func ParseFilterSpec(spec string) (FilterField, string, error) {
 	case "awk":
 		return FilterAwk, pattern, nil
 	default:
-		return 0, "", fmt.Errorf("unknown field %q (use: host, url, method, content-type, body, header, awk)", field)
+		return 0, "", fmt.Errorf("unknown field %q (use: host, url, method, content-type, body, header, awk, awk!)", field)
 	}
 }

@@ -253,25 +253,48 @@ relay:
 	if ui.Interceptor.IsEnabled() {
 		firstBuf := make([]byte, 65536)
 		n, readErr := clientReader.Read(firstBuf)
-		if n > 0 && !ui.Interceptor.ShouldIntercept(connRecord, firstBuf[:n]) {
-			// Doesn't match filters — forward without pausing
-			if _, err := c2s.Write(firstBuf[:n]); err != nil {
-				connRecord.mu.Lock()
-				connRecord.Status = "FAILED"
-				connRecord.mu.Unlock()
-				ui.RefreshList()
-				return
-			}
-			if readErr != nil {
-				connRecord.mu.Lock()
-				connRecord.Status = "CLOSED"
-				connRecord.mu.Unlock()
-				ui.RefreshList()
-				return
-			}
-			goto startRelay
-		}
 		if n > 0 {
+			result := ui.Interceptor.ProcessFilters(connRecord, firstBuf[:n])
+
+			if !result.Matched {
+				// No filter matched — forward without pausing
+				if _, err := c2s.Write(firstBuf[:n]); err != nil {
+					connRecord.mu.Lock()
+					connRecord.Status = "FAILED"
+					connRecord.mu.Unlock()
+					ui.RefreshList()
+					return
+				}
+				if readErr != nil {
+					connRecord.mu.Lock()
+					connRecord.Status = "CLOSED"
+					connRecord.mu.Unlock()
+					ui.RefreshList()
+					return
+				}
+				goto startRelay
+			}
+
+			if result.Rewritten {
+				// Awk rewrite filter produced replacement data — auto-forward
+				if _, err := c2s.Write(result.RewriteData); err != nil {
+					connRecord.mu.Lock()
+					connRecord.Status = "FAILED"
+					connRecord.mu.Unlock()
+					ui.RefreshList()
+					return
+				}
+				if readErr != nil {
+					connRecord.mu.Lock()
+					connRecord.Status = "CLOSED"
+					connRecord.mu.Unlock()
+					ui.RefreshList()
+					return
+				}
+				goto startRelay
+			}
+
+			// Match without rewrite — pause for manual editing
 			data, forward := ui.Interceptor.Submit(connRecord, firstBuf[:n])
 			if !forward {
 				connRecord.mu.Lock()
@@ -280,7 +303,6 @@ relay:
 				ui.RefreshList()
 				return
 			}
-			// Write the (possibly modified) data through the capture writer
 			if _, err := c2s.Write(data); err != nil {
 				connRecord.mu.Lock()
 				connRecord.Status = "FAILED"

@@ -46,7 +46,8 @@ go build -o socks5proxy .
 | `-ca-cert` | `ca.pem` | Path to CA certificate file |
 | `-ca-key` | `ca-key.pem` | Path to CA private key file |
 | `-db` | `""` | Path to SQLite database for traffic capture (empty = disabled) |
-| `-filter` | | Intercept filter as `field:regex` (repeatable, see below) |
+| `-filter` | | Intercept filter as `field:regex`, `awk:expr`, or `awk!:expr` (repeatable, see below) |
+| `-awk-no-sandbox` | `false` | Disable awk sandbox (allows `system()`, pipes, I/O redirection) |
 
 ### Keyboard Controls
 
@@ -159,7 +160,7 @@ Two filter types are supported: **regex** filters match against a specific field
 ./socks5proxy -port 1080 -filter "url:/api/login" -filter "body:password"
 ```
 
-**Awk filters (from the CLI):**
+**Awk match filters** (`awk:`) — pause matching requests for manual editing:
 ```bash
 # Intercept POST requests to any /api/ endpoint
 ./socks5proxy -port 1080 -filter 'awk:method == "POST" && url ~ /\/api\//'
@@ -174,9 +175,24 @@ Two filter types are supported: **regex** filters match against a specific field
 ./socks5proxy -port 1080 -filter 'awk:method == "POST" && host ~ /auth\./ && content_type ~ /json/ && url ~ /login/ { print }'
 ```
 
+**Awk rewrite filters** (`awk!:`) — awk output **replaces** the request and auto-forwards (no manual editing):
+```bash
+# Auto-inject a header into all POST requests
+./socks5proxy -port 1080 -filter 'awk!:{ print; if (NR==1) print "X-Injected: true" }'
+
+# Replace all occurrences of "staging" with "production"
+./socks5proxy -port 1080 -filter 'awk!:{ gsub(/staging/, "production"); print }'
+
+# Rewrite the Host header
+./socks5proxy -port 1080 -filter 'awk!:/^Host:/ { print "Host: newhost.com"; next } { print }'
+
+# Add auth header to requests missing one
+./socks5proxy -port 1080 -filter 'awk!:BEGIN{found=0} /^Authorization:/{found=1} {print} END{if(!found) print "Authorization: Bearer tok123"}'
+```
+
 **From the TUI:**
 - Press `F` to open the filter management dialog
-- Type a filter in `field:regex` or `awk:expression` format and press Enter
+- Type a filter in `field:regex`, `awk:expression`, or `awk!:expression` format and press Enter
 - Select a filter and press Enter to delete it
 - Press Escape to close
 - Press `C` to clear all filters
@@ -206,6 +222,21 @@ Two filter types are supported: **regex** filters match against a specific field
 | `$0` | Full raw request (each line is a record) |
 
 The awk expression receives the full raw request on stdin. If awk produces **any output**, the filter matches. Use `{ print }` after a condition, or rely on awk's default print behavior with pattern matching (e.g. `/regex/`). Awk filters have a 5-second timeout.
+
+### Awk Security (Sandbox)
+
+By default, awk filters run with `--sandbox` mode (GNU awk), which disables:
+- `system()` calls
+- Piping to/from shell commands (`|`, `|&`)
+- I/O redirection (`>`, `>>`, `<`)
+
+This prevents malicious request content from exploiting awk to execute arbitrary commands. If you need these features (e.g., for logging to files), disable the sandbox:
+
+```bash
+./socks5proxy -port 1080 -awk-no-sandbox -filter 'awk!:...'
+```
+
+> **Warning:** Only disable the sandbox when you trust the traffic source. Crafted request payloads could exploit awk `system()` calls if sandboxing is off.
 
 ## Database Capture
 
