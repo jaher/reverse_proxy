@@ -29,6 +29,7 @@ type Connection struct {
 	ServerToClient bytes.Buffer
 	ReqTruncated   bool
 	RespTruncated  bool
+	Evicted        bool
 	parsedReq      *ParsedHTTP
 	parsedResp     *ParsedHTTP
 	lastReqLen     int
@@ -146,12 +147,21 @@ func (s *ConnectionStore) evictLocked() {
 	}
 	for s.memoryUsageLocked() > s.maxMemory {
 		evicted := false
-		for i, c := range s.conns {
+		for _, c := range s.conns {
 			c.mu.Lock()
 			done := c.Status == "CLOSED" || c.Status == "FAILED" || c.Status == "DROPPED"
+			alreadyEvicted := c.Evicted
 			c.mu.Unlock()
-			if done {
-				s.conns = append(s.conns[:i], s.conns[i+1:]...)
+			if done && !alreadyEvicted {
+				c.mu.Lock()
+				c.ClientToServer.Reset()
+				c.ServerToClient.Reset()
+				c.parsedReq = nil
+				c.parsedResp = nil
+				c.lastReqLen = 0
+				c.lastRespLen = 0
+				c.Evicted = true
+				c.mu.Unlock()
 				s.evictedCount++
 				evicted = true
 				break
@@ -863,30 +873,60 @@ func (ui *UI) updateDetail() {
 
 	var data []byte
 	var parsed *ParsedHTTP
+	fromDB := false
 
-	if ui.viewMode == tabRequest {
-		data = conn.RequestBytes()
-		parsed = conn.Request()
-		conn.mu.Lock()
-		truncated := conn.ReqTruncated
-		conn.mu.Unlock()
-		if truncated {
-			ui.detail.SetTitle(" Request [TRUNCATED] ")
-		} else {
-			ui.detail.SetTitle(" Request ")
-		}
-	} else {
-		data = conn.ResponseBytes()
-		parsed = conn.Response()
-		conn.mu.Lock()
-		truncated := conn.RespTruncated
-		conn.mu.Unlock()
-		if truncated {
-			ui.detail.SetTitle(" Response [TRUNCATED] ")
-		} else {
-			ui.detail.SetTitle(" Response ")
+	conn.mu.Lock()
+	evicted := conn.Evicted
+	conn.mu.Unlock()
+
+	// If evicted, try loading from DB
+	if evicted && ui.db != nil {
+		reqData, respData, found, err := ui.db.LoadConnectionPayload(conn.ID)
+		if err == nil && found {
+			fromDB = true
+			if ui.viewMode == tabRequest {
+				data = reqData
+				parsed = ParseHTTPRequest(reqData)
+			} else {
+				data = respData
+				parsed = ParseHTTPResponse(respData)
+			}
 		}
 	}
+
+	if !fromDB {
+		if ui.viewMode == tabRequest {
+			data = conn.RequestBytes()
+			parsed = conn.Request()
+		} else {
+			data = conn.ResponseBytes()
+			parsed = conn.Response()
+		}
+	}
+
+	// Set title with status indicators
+	title := " Request "
+	if ui.viewMode == tabResponse {
+		title = " Response "
+	}
+	if evicted && fromDB {
+		title = fmt.Sprintf(" %s[FROM DB] ", title[:len(title)-1])
+	} else if evicted {
+		title = fmt.Sprintf(" %s[EVICTED] ", title[:len(title)-1])
+	} else {
+		conn.mu.Lock()
+		var truncated bool
+		if ui.viewMode == tabRequest {
+			truncated = conn.ReqTruncated
+		} else {
+			truncated = conn.RespTruncated
+		}
+		conn.mu.Unlock()
+		if truncated {
+			title = fmt.Sprintf(" %s[TRUNCATED] ", title[:len(title)-1])
+		}
+	}
+	ui.detail.SetTitle(title)
 
 	var text string
 	switch ui.fmtMode {
@@ -975,9 +1015,13 @@ func (ui *UI) rebuildTable() {
 		connColor := tcell.ColorWhite
 		c.mu.Lock()
 		st := c.Status
+		isEvicted := c.Evicted
 		c.mu.Unlock()
 		if st == "FAILED" {
 			connColor = tcell.ColorRed
+		}
+		if isEvicted {
+			connColor = tcell.ColorDarkGray
 		}
 
 		ui.reqTable.SetCell(row, 0, tview.NewTableCell(strconv.Itoa(c.ID)).SetTextColor(connColor).SetExpansion(1))

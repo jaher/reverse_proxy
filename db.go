@@ -144,6 +144,25 @@ func (d *DB) SaveAllConnections(store *ConnectionStore) (int, error) {
 	return saved, nil
 }
 
+// LoadConnectionPayload loads the request and response data for a connection from the database.
+// Returns (requestData, responseData, found, error).
+func (d *DB) LoadConnectionPayload(proxyID int) ([]byte, []byte, bool, error) {
+	row := d.db.QueryRow(
+		`SELECT request_data, response_data FROM connections WHERE proxy_id = ? ORDER BY id DESC LIMIT 1`,
+		proxyID,
+	)
+
+	var reqData, respData []byte
+	err := row.Scan(&reqData, &respData)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, err
+	}
+	return reqData, respData, true, nil
+}
+
 func (d *DB) Path() string {
 	return d.filepath
 }
