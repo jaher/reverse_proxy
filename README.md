@@ -143,9 +143,11 @@ Requests queue up while you're editing — the status bar shows how many are wai
 
 ### Intercept Filters
 
-By default, intercept mode pauses **all** requests. Use filters to only pause requests matching specific patterns. Filters use regex and are OR'd together (any match triggers interception).
+By default, intercept mode pauses **all** requests. Use filters to only pause requests matching specific patterns. Filters are OR'd together (any match triggers interception).
 
-**From the CLI:**
+Two filter types are supported: **regex** filters match against a specific field, and **awk** filters give you full programmability.
+
+**Regex filters (from the CLI):**
 ```bash
 # Only intercept requests to example.com
 ./socks5proxy -port 1080 -filter "host:example\.com"
@@ -157,14 +159,29 @@ By default, intercept mode pauses **all** requests. Use filters to only pause re
 ./socks5proxy -port 1080 -filter "url:/api/login" -filter "body:password"
 ```
 
+**Awk filters (from the CLI):**
+```bash
+# Intercept POST requests to any /api/ endpoint
+./socks5proxy -port 1080 -filter 'awk:method == "POST" && url ~ /\/api\//'
+
+# Intercept requests with bodies larger than 1KB
+./socks5proxy -port 1080 -filter 'awk:body_len + 0 > 1024 { print }'
+
+# Intercept requests containing "password" or "token" anywhere
+./socks5proxy -port 1080 -filter 'awk:/password|token/ { print }'
+
+# Complex: intercept JSON POSTs to login endpoints on specific hosts
+./socks5proxy -port 1080 -filter 'awk:method == "POST" && host ~ /auth\./ && content_type ~ /json/ && url ~ /login/ { print }'
+```
+
 **From the TUI:**
 - Press `F` to open the filter management dialog
-- Type a filter in `field:regex` format and press Enter
+- Type a filter in `field:regex` or `awk:expression` format and press Enter
 - Select a filter and press Enter to delete it
 - Press Escape to close
 - Press `C` to clear all filters
 
-**Supported filter fields:**
+**Regex filter fields:**
 
 | Field | Matches against |
 |-------|----------------|
@@ -174,6 +191,21 @@ By default, intercept mode pauses **all** requests. Use filters to only pause re
 | `content-type` / `ct` / `mime` | Content-Type header value |
 | `body` | Request body content |
 | `header` / `headers` | All headers concatenated |
+
+**Awk filter variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `method` | HTTP method (GET, POST, etc.) |
+| `url` | Request URL path |
+| `host` | Destination host:port |
+| `proto` | Protocol (HTTP/1.1, etc.) |
+| `content_type` | Content-Type header value |
+| `body_len` | Body length in bytes |
+| `headers` | All headers as newline-delimited string |
+| `$0` | Full raw request (each line is a record) |
+
+The awk expression receives the full raw request on stdin. If awk produces **any output**, the filter matches. Use `{ print }` after a condition, or rely on awk's default print behavior with pattern matching (e.g. `/regex/`). Awk filters have a 5-second timeout.
 
 ## Database Capture
 

@@ -58,10 +58,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid filter %q: %v", spec, err)
 		}
-		if err := interceptor.AddFilter(field, pattern); err != nil {
-			log.Fatalf("Invalid filter regex %q: %v", spec, err)
+		if field == FilterAwk {
+			if err := interceptor.AddAwkFilter(pattern); err != nil {
+				log.Fatalf("Invalid awk filter %q: %v", spec, err)
+			}
+			fmt.Fprintf(os.Stderr, "Intercept filter: awk { %s }\n", pattern)
+		} else {
+			if err := interceptor.AddFilter(field, pattern); err != nil {
+				log.Fatalf("Invalid filter regex %q: %v", spec, err)
+			}
+			fmt.Fprintf(os.Stderr, "Intercept filter: %s =~ /%s/\n", field, pattern)
 		}
-		fmt.Fprintf(os.Stderr, "Intercept filter: %s =~ /%s/\n", field, pattern)
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)

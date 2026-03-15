@@ -187,7 +187,7 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 
 	// Filter management UI
 	filterInput := tview.NewInputField()
-	filterInput.SetLabel("Add filter (field:regex): ")
+	filterInput.SetLabel("Add filter (field:regex or awk:expr):")
 	filterInput.SetFieldWidth(50)
 	filterInput.SetBorder(true)
 	filterInput.SetTitle(" New Filter ")
@@ -282,12 +282,21 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Inter
 				field, pattern, err := ParseFilterSpec(spec)
 				if err != nil {
 					filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
+				} else if field == FilterAwk {
+					if err := ui.Interceptor.AddAwkFilter(pattern); err != nil {
+						filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
+					} else {
+						filterInput.SetText("")
+						filterInput.SetLabel("Add filter (field:regex or awk:expr): ")
+						ui.rebuildFilterList()
+						ui.updateStatusBar()
+					}
 				} else {
 					if err := ui.Interceptor.AddFilter(field, pattern); err != nil {
 						filterInput.SetLabel(fmt.Sprintf("[red]%v[-] | filter: ", err))
 					} else {
 						filterInput.SetText("")
-						filterInput.SetLabel("Add filter (field:regex): ")
+						filterInput.SetLabel("Add filter (field:regex or awk:expr): ")
 						ui.rebuildFilterList()
 						ui.updateStatusBar()
 					}
@@ -501,7 +510,7 @@ func (ui *UI) showFilters() {
 	}
 	ui.showingFilters = true
 	ui.filterInput.SetText("")
-	ui.filterInput.SetLabel("Add filter (field:regex): ")
+	ui.filterInput.SetLabel("Add filter (field:regex or awk:expr):")
 	ui.rebuildFilterList()
 	ui.pages.ShowPage("filters")
 	ui.App.SetFocus(ui.filterInput)
