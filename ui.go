@@ -27,6 +27,8 @@ type Connection struct {
 	mu             sync.Mutex
 	ClientToServer bytes.Buffer
 	ServerToClient bytes.Buffer
+	ReqTruncated   bool
+	RespTruncated  bool
 	parsedReq      *ParsedHTTP
 	parsedResp     *ParsedHTTP
 	lastReqLen     int
@@ -72,13 +74,15 @@ func (c *Connection) ResponseBytes() []byte {
 }
 
 type ConnectionStore struct {
-	mu     sync.Mutex
-	conns  []*Connection
-	nextID int
+	mu          sync.Mutex
+	conns       []*Connection
+	nextID      int
+	maxMemory   int // max memory in bytes; 0 = unlimited
+	evictedCount int // total connections evicted
 }
 
-func NewConnectionStore() *ConnectionStore {
-	return &ConnectionStore{nextID: 1}
+func NewConnectionStore(maxMemory int) *ConnectionStore {
+	return &ConnectionStore{nextID: 1, maxMemory: maxMemory}
 }
 
 func (s *ConnectionStore) Add(target, clientAddr string) *Connection {
@@ -93,6 +97,7 @@ func (s *ConnectionStore) Add(target, clientAddr string) *Connection {
 	}
 	s.nextID++
 	s.conns = append(s.conns, c)
+	s.evictLocked()
 	return c
 }
 
@@ -102,6 +107,60 @@ func (s *ConnectionStore) All() []*Connection {
 	result := make([]*Connection, len(s.conns))
 	copy(result, s.conns)
 	return result
+}
+
+// MemoryUsage returns the total bytes used by all connection buffers.
+func (s *ConnectionStore) MemoryUsage() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.memoryUsageLocked()
+}
+
+func (s *ConnectionStore) memoryUsageLocked() int {
+	total := 0
+	for _, c := range s.conns {
+		c.mu.Lock()
+		total += c.ClientToServer.Len() + c.ServerToClient.Len()
+		c.mu.Unlock()
+	}
+	return total
+}
+
+// EvictedCount returns how many connections have been evicted.
+func (s *ConnectionStore) EvictedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evictedCount
+}
+
+// Evict removes the oldest closed/failed connections until memory is under the limit.
+func (s *ConnectionStore) Evict() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.evictLocked()
+}
+
+func (s *ConnectionStore) evictLocked() {
+	if s.maxMemory <= 0 {
+		return
+	}
+	for s.memoryUsageLocked() > s.maxMemory {
+		evicted := false
+		for i, c := range s.conns {
+			c.mu.Lock()
+			done := c.Status == "CLOSED" || c.Status == "FAILED" || c.Status == "DROPPED"
+			c.mu.Unlock()
+			if done {
+				s.conns = append(s.conns[:i], s.conns[i+1:]...)
+				s.evictedCount++
+				evicted = true
+				break
+			}
+		}
+		if !evicted {
+			break // only active connections remain, can't evict
+		}
+	}
 }
 
 // viewTab: which payload to show
@@ -740,9 +799,24 @@ func (ui *UI) updateStatusBar() {
 		filterStatus = fmt.Sprintf("  [yellow]Filters:[aqua] %d[white]", filterCount)
 	}
 
+	memBytes := ui.Store.MemoryUsage()
+	memMB := float64(memBytes) / (1024 * 1024)
+	memColor := "green"
+	if ui.Store.maxMemory > 0 && memBytes > ui.Store.maxMemory*80/100 {
+		memColor = "yellow"
+	}
+	if ui.Store.maxMemory > 0 && memBytes > ui.Store.maxMemory*95/100 {
+		memColor = "red"
+	}
+	memStatus := fmt.Sprintf("  [yellow]Mem:[%s] %.1fMB[white]", memColor, memMB)
+	evicted := ui.Store.EvictedCount()
+	if evicted > 0 {
+		memStatus += fmt.Sprintf(" [red](%d evicted)[white]", evicted)
+	}
+
 	ui.statusBar.SetText(fmt.Sprintf(
-		" [yellow]Listening:[white] %s%s  [yellow]Intercept:[white]%s%s  [yellow]i:[white] toggle  [yellow]F:[white] filters  [yellow]C:[white] clear  [yellow]q:[white] quit",
-		ui.listenAddr, dbStatus, interceptStatus, filterStatus,
+		" [yellow]Listening:[white] %s%s%s  [yellow]Intercept:[white]%s%s  [yellow]i:[white] toggle  [yellow]F:[white] filters  [yellow]C:[white] clear  [yellow]q:[white] quit",
+		ui.listenAddr, dbStatus, memStatus, interceptStatus, filterStatus,
 	))
 }
 
@@ -793,11 +867,25 @@ func (ui *UI) updateDetail() {
 	if ui.viewMode == tabRequest {
 		data = conn.RequestBytes()
 		parsed = conn.Request()
-		ui.detail.SetTitle(" Request ")
+		conn.mu.Lock()
+		truncated := conn.ReqTruncated
+		conn.mu.Unlock()
+		if truncated {
+			ui.detail.SetTitle(" Request [TRUNCATED] ")
+		} else {
+			ui.detail.SetTitle(" Request ")
+		}
 	} else {
 		data = conn.ResponseBytes()
 		parsed = conn.Response()
-		ui.detail.SetTitle(" Response ")
+		conn.mu.Lock()
+		truncated := conn.RespTruncated
+		conn.mu.Unlock()
+		if truncated {
+			ui.detail.SetTitle(" Response [TRUNCATED] ")
+		} else {
+			ui.detail.SetTitle(" Response ")
+		}
 	}
 
 	var text string
@@ -859,6 +947,14 @@ func (ui *UI) rebuildTable() {
 			mime = resp.ContentType()
 		}
 
+		c.mu.Lock()
+		reqTrunc := c.ReqTruncated
+		respTrunc := c.RespTruncated
+		c.mu.Unlock()
+		if reqTrunc || respTrunc {
+			length += " !TRUNC"
+		}
+
 		tlsStr := ""
 		if c.TLSIntercepted {
 			tlsStr = "yes"
@@ -889,7 +985,11 @@ func (ui *UI) rebuildTable() {
 		ui.reqTable.SetCell(row, 2, tview.NewTableCell(method).SetTextColor(tcell.ColorAqua).SetExpansion(1))
 		ui.reqTable.SetCell(row, 3, tview.NewTableCell(url).SetExpansion(2))
 		ui.reqTable.SetCell(row, 4, tview.NewTableCell(status).SetTextColor(statusColor).SetExpansion(1))
-		ui.reqTable.SetCell(row, 5, tview.NewTableCell(length).SetExpansion(1))
+		lengthCell := tview.NewTableCell(length).SetExpansion(1)
+		if reqTrunc || respTrunc {
+			lengthCell.SetTextColor(tcell.ColorRed)
+		}
+		ui.reqTable.SetCell(row, 5, lengthCell)
 		ui.reqTable.SetCell(row, 6, tview.NewTableCell(mime).SetExpansion(1))
 		ui.reqTable.SetCell(row, 7, tview.NewTableCell(tlsStr).SetExpansion(1))
 	}

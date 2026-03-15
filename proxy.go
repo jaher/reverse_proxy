@@ -54,10 +54,14 @@ func (cw *CaptureWriter) Write(p []byte) (int, error) {
 		case "c2s":
 			if cw.conn.ClientToServer.Len() < maxCaptureSize {
 				cw.conn.ClientToServer.Write(p[:n])
+			} else {
+				cw.conn.ReqTruncated = true
 			}
 		case "s2c":
 			if cw.conn.ServerToClient.Len() < maxCaptureSize {
 				cw.conn.ServerToClient.Write(p[:n])
+			} else {
+				cw.conn.RespTruncated = true
 			}
 		}
 		cw.conn.mu.Unlock()
@@ -342,6 +346,7 @@ startRelay:
 		cfg.DB.SaveConnection(connRecord)
 	}
 
+	ui.Store.Evict()
 	ui.RefreshList()
 }
 

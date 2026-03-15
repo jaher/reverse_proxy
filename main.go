@@ -24,6 +24,7 @@ func main() {
 	caKeyPath := flag.String("ca-key", "ca-key.pem", "Path to CA private key file")
 	dbPath := flag.String("db", "", "Path to SQLite database for capturing traffic (e.g. capture.db)")
 	maxCaptureMB := flag.Int("max-capture", 10, "Max payload capture size per direction in MB")
+	maxMemoryMB := flag.Int("max-memory", 250, "Max memory for captured connections in MB (0 = unlimited)")
 	var filters filterFlags
 	flag.Var(&filters, "filter", "Intercept filter as field:regex (repeatable). Fields: host, url, method, content-type, body, header, awk, awk!")
 	flag.Parse()
@@ -93,7 +94,7 @@ func main() {
 	defer listener.Close()
 
 	listenAddr := listener.Addr().String()
-	store := NewConnectionStore()
+	store := NewConnectionStore(*maxMemoryMB << 20)
 	ui := NewUI(store, listenAddr, db, interceptor)
 
 	go func() {
