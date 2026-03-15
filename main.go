@@ -49,7 +49,8 @@ func main() {
 
 	listenAddr := listener.Addr().String()
 	store := NewConnectionStore()
-	ui := NewUI(store, listenAddr, db)
+	interceptor := NewInterceptor()
+	ui := NewUI(store, listenAddr, db, interceptor)
 
 	go func() {
 		for {

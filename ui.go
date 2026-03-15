@@ -14,19 +14,19 @@ import (
 const maxCaptureSize = 1 << 20 // 1 MB per direction
 
 type Connection struct {
-	ID              int
-	Target          string
-	ClientAddr      string
-	StartTime       time.Time
-	Status          string // "ACTIVE", "CLOSED", "FAILED"
-	TLSIntercepted  bool
-	mu              sync.Mutex
-	ClientToServer  bytes.Buffer
-	ServerToClient  bytes.Buffer
-	parsedReq       *ParsedHTTP
-	parsedResp      *ParsedHTTP
-	lastReqLen      int
-	lastRespLen     int
+	ID             int
+	Target         string
+	ClientAddr     string
+	StartTime      time.Time
+	Status         string // "ACTIVE", "CLOSED", "FAILED"
+	TLSIntercepted bool
+	mu             sync.Mutex
+	ClientToServer bytes.Buffer
+	ServerToClient bytes.Buffer
+	parsedReq      *ParsedHTTP
+	parsedResp     *ParsedHTTP
+	lastReqLen     int
+	lastRespLen    int
 }
 
 func (c *Connection) Request() *ParsedHTTP {
@@ -81,11 +81,11 @@ func (s *ConnectionStore) Add(target, clientAddr string) *Connection {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := &Connection{
-		ID:        s.nextID,
-		Target:    target,
+		ID:         s.nextID,
+		Target:     target,
 		ClientAddr: clientAddr,
-		StartTime: time.Now(),
-		Status:    "ACTIVE",
+		StartTime:  time.Now(),
+		Status:     "ACTIVE",
 	}
 	s.nextID++
 	s.conns = append(s.conns, c)
@@ -118,31 +118,36 @@ const (
 )
 
 type UI struct {
-	App       *tview.Application
-	Store     *ConnectionStore
+	App         *tview.Application
+	Store       *ConnectionStore
+	Interceptor *Interceptor
 
 	// Layout pieces
-	hostList  *tview.List
-	reqTable  *tview.Table
-	tabBar    *tview.TextView
-	detail    *tview.TextView
-	statusBar *tview.TextView
+	hostList    *tview.List
+	reqTable    *tview.Table
+	tabBar      *tview.TextView
+	detail      *tview.TextView
+	editor      *tview.TextArea
+	statusBar   *tview.TextView
+	bottomPane  *tview.Flex
 
 	// State
-	viewMode   viewTab
-	fmtMode    formatTab
-	selConn    int // index into filtered list
-	hosts      []string
-	selHost    string // "" means all
-	filtered   []*Connection
-	db         *DB
-	listenAddr string
+	viewMode    viewTab
+	fmtMode     formatTab
+	selConn     int // index into filtered list
+	hosts       []string
+	selHost     string // "" means all
+	filtered    []*Connection
+	db          *DB
+	listenAddr  string
+	editing     bool
+	currentIntercept *InterceptRequest
 
 	refreshMu   sync.Mutex
 	lastRefresh time.Time
 }
 
-func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
+func NewUI(store *ConnectionStore, listenAddr string, db *DB, interceptor *Interceptor) *UI {
 	app := tview.NewApplication()
 
 	hostList := tview.NewList()
@@ -165,21 +170,27 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 	detail.SetWrap(false)
 	detail.SetDynamicColors(false)
 
+	editor := tview.NewTextArea()
+	editor.SetBorder(true)
+	editor.SetTitle(" Edit Request | Ctrl+F: forward | Ctrl+X: drop ")
+
 	statusBar := tview.NewTextView()
 	statusBar.SetDynamicColors(true)
 
 	ui := &UI{
-		App:        app,
-		Store:      store,
-		hostList:   hostList,
-		reqTable:   reqTable,
-		tabBar:     tabBar,
-		detail:     detail,
-		statusBar:  statusBar,
-		viewMode:   tabRequest,
-		fmtMode:    fmtRaw,
-		db:         db,
-		listenAddr: listenAddr,
+		App:         app,
+		Store:       store,
+		Interceptor: interceptor,
+		hostList:    hostList,
+		reqTable:    reqTable,
+		tabBar:      tabBar,
+		detail:      detail,
+		editor:      editor,
+		statusBar:   statusBar,
+		viewMode:    tabRequest,
+		fmtMode:     fmtRaw,
+		db:          db,
+		listenAddr:  listenAddr,
 	}
 
 	// Table header
@@ -204,7 +215,7 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 		ui.updateDetail()
 	})
 
-	// Layout: top = hosts + table, bottom = tabs + detail
+	// Layout: top = hosts + table, bottom = tabs + detail/editor
 	topPane := tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(hostList, 30, 0, true).
 		AddItem(reqTable, 0, 1, false)
@@ -212,6 +223,7 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 	bottomPane := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(tabBar, 1, 0, false).
 		AddItem(detail, 0, 1, false)
+	ui.bottomPane = bottomPane
 
 	mainLayout := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(topPane, 0, 1, true).
@@ -225,6 +237,20 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 	focusIdx := 0
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		// When editing an intercepted request, only handle editor keys
+		if ui.editing {
+			switch event.Key() {
+			case tcell.KeyCtrlF:
+				ui.forwardIntercept()
+				return nil
+			case tcell.KeyCtrlX:
+				ui.dropIntercept()
+				return nil
+			}
+			// Let all other keys pass through to the TextArea
+			return event
+		}
+
 		switch event.Key() {
 		case tcell.KeyTab:
 			focusIdx = (focusIdx + 1) % len(focusOrder)
@@ -255,7 +281,6 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 				ui.updateDetail()
 				return nil
 			case 'h':
-				// Only switch format if detail pane is focused
 				ui.fmtMode = fmtHeaders
 				ui.updateTabBar()
 				ui.updateDetail()
@@ -267,8 +292,7 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 				return nil
 			case 'd':
 				if ui.db != nil {
-					enabled := ui.db.Toggle()
-					_ = enabled
+					ui.db.Toggle()
 					ui.updateStatusBar()
 				}
 				return nil
@@ -282,15 +306,90 @@ func NewUI(store *ConnectionStore, listenAddr string, db *DB) *UI {
 					}
 				}
 				return nil
+			case 'i':
+				enabled := ui.Interceptor.Toggle()
+				_ = enabled
+				ui.updateStatusBar()
+				return nil
 			}
 		}
 		return event
 	})
 
+	// Start goroutine that watches for pending intercept requests
+	go ui.watchIntercepts()
+
 	ui.updateTabBar()
 	ui.updateStatusBar()
 
 	return ui
+}
+
+// watchIntercepts listens for incoming intercept requests and shows the editor.
+func (ui *UI) watchIntercepts() {
+	for req := range ui.Interceptor.Pending() {
+		ui.App.QueueUpdateDraw(func() {
+			ui.showEditor(req)
+		})
+	}
+}
+
+// showEditor swaps the detail view for the editable text area.
+func (ui *UI) showEditor(req *InterceptRequest) {
+	ui.editing = true
+	ui.currentIntercept = req
+
+	// Show the raw request data in the editor
+	ui.editor.SetText(string(req.Data), true)
+	connLabel := fmt.Sprintf(" Edit Request #%d -> %s | Ctrl+F: forward | Ctrl+X: drop ", req.Conn.ID, req.Conn.Target)
+	ui.editor.SetTitle(connLabel)
+
+	// Swap detail for editor in bottom pane
+	ui.bottomPane.RemoveItem(ui.detail)
+	ui.bottomPane.AddItem(ui.editor, 0, 1, true)
+	ui.App.SetFocus(ui.editor)
+
+	ui.updateTabBar()
+	ui.updateStatusBar()
+}
+
+// hideEditor swaps the editor back to the detail view.
+func (ui *UI) hideEditor() {
+	ui.editing = false
+	ui.currentIntercept = nil
+
+	ui.bottomPane.RemoveItem(ui.editor)
+	ui.bottomPane.AddItem(ui.detail, 0, 1, false)
+	ui.App.SetFocus(ui.reqTable)
+
+	ui.updateTabBar()
+	ui.updateStatusBar()
+}
+
+// forwardIntercept sends the (possibly edited) data to the proxy and closes the editor.
+func (ui *UI) forwardIntercept() {
+	if ui.currentIntercept == nil {
+		return
+	}
+
+	editedText := ui.editor.GetText()
+	ui.currentIntercept.Result <- InterceptResult{
+		Data:    []byte(editedText),
+		Forward: true,
+	}
+	ui.hideEditor()
+}
+
+// dropIntercept drops the connection and closes the editor.
+func (ui *UI) dropIntercept() {
+	if ui.currentIntercept == nil {
+		return
+	}
+
+	ui.currentIntercept.Result <- InterceptResult{
+		Forward: false,
+	}
+	ui.hideEditor()
 }
 
 func (ui *UI) setTableHeaders() {
@@ -318,9 +417,22 @@ func (ui *UI) updateStatusBar() {
 			dbStatus = "  [red]DB: OFF[white]"
 		}
 	}
+
+	interceptStatus := " [red]OFF[white]"
+	if ui.Interceptor.IsEnabled() {
+		interceptStatus = " [green]ON[white]"
+	}
+	if ui.editing {
+		interceptStatus += fmt.Sprintf(" [yellow](editing #%d)[white]", ui.currentIntercept.Conn.ID)
+	}
+	qLen := ui.Interceptor.QueueLen()
+	if qLen > 0 {
+		interceptStatus += fmt.Sprintf(" [yellow](%d queued)[white]", qLen)
+	}
+
 	ui.statusBar.SetText(fmt.Sprintf(
-		" [yellow]Listening:[white] %s%s  [yellow]Tab:[white] pane  [yellow]1/2:[white] Req/Resp  [yellow]r/h/x:[white] Raw/Headers/Hex  [yellow]d:[white] toggle DB  [yellow]S:[white] save all  [yellow]q:[white] quit",
-		ui.listenAddr, dbStatus,
+		" [yellow]Listening:[white] %s%s  [yellow]Intercept:[white]%s  [yellow]i:[white] toggle  [yellow]1/2:[white] Req/Resp  [yellow]r/h/x:[white] Raw/Headers/Hex  [yellow]d:[white] DB  [yellow]q:[white] quit",
+		ui.listenAddr, dbStatus, interceptStatus,
 	))
 }
 
@@ -330,6 +442,11 @@ func (ui *UI) updateTabBar() {
 	rawLabel := "  Raw  "
 	headersLabel := "  Headers  "
 	hexLabel := "  Hex  "
+
+	if ui.editing {
+		ui.tabBar.SetText(" [black:red] INTERCEPTED [-:-]   Ctrl+F: forward edited request   Ctrl+X: drop connection")
+		return
+	}
 
 	if ui.viewMode == tabRequest {
 		reqLabel = " [black:yellow] Request [-:-] "
@@ -350,6 +467,9 @@ func (ui *UI) updateTabBar() {
 }
 
 func (ui *UI) updateDetail() {
+	if ui.editing {
+		return
+	}
 	if ui.selConn < 0 || ui.selConn >= len(ui.filtered) {
 		ui.detail.SetText("")
 		return
@@ -516,7 +636,6 @@ func (ui *UI) RefreshList() {
 }
 
 func hostFromTarget(target string) string {
-	// target is "host:port", return just host
 	for i := len(target) - 1; i >= 0; i-- {
 		if target[i] == ':' {
 			return target[:i]

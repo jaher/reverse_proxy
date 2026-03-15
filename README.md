@@ -9,6 +9,7 @@ A SOCKS5 proxy with a Burp Suite-style terminal UI for inspecting HTTP/HTTPS tra
 - **Multiple view modes**: Raw (human-readable text), Headers, and Hex dump
 - **HTTP auto-detection**: displays HTTP payloads as readable text, binary as hex
 - **TLS MITM interception**: decrypt and inspect HTTPS traffic with `--mitm` flag
+- **Request interception**: pause, edit, and forward/drop outgoing requests before they reach the server
 - **Payload capture**: up to 1 MB per direction per connection
 
 ## Building
@@ -56,6 +57,9 @@ go build -o socks5proxy .
 | `r` | Raw view (human-readable text) |
 | `h` | Headers view |
 | `x` | Hex dump view |
+| `i` | Toggle request interception on/off |
+| `Ctrl+F` | Forward intercepted request (from editor) |
+| `Ctrl+X` | Drop intercepted connection (from editor) |
 | `d` | Toggle database capture on/off |
 | `S` (shift+s) | Save all closed connections to database |
 | `q` | Quit |
@@ -122,6 +126,17 @@ Import-Certificate -FilePath ca.pem -CertStoreLocation Cert:\LocalMachine\Root
 ```
 
 > **Important:** Only trust this CA on machines you control and for testing/development purposes. Remove it from your trust store when you're done to avoid security risks.
+
+## Request Interception
+
+Press `i` to toggle intercept mode. When enabled, each new outgoing request is paused before reaching the server:
+
+1. The detail pane switches to an editable text area showing the raw request
+2. Edit the request freely (modify headers, body, URL, etc.)
+3. Press `Ctrl+F` to forward the edited request to the server
+4. Press `Ctrl+X` to drop the connection entirely
+
+Requests queue up while you're editing — the status bar shows how many are waiting. This works with both plain HTTP and TLS-intercepted HTTPS traffic.
 
 ## Database Capture
 

@@ -249,6 +249,37 @@ relay:
 	c2s := &CaptureWriter{conn: connRecord, direction: "c2s", dest: remoteWriter, onWrite: refreshFn}
 	s2c := &CaptureWriter{conn: connRecord, direction: "s2c", dest: clientWriter, onWrite: refreshFn}
 
+	// Intercept the first c2s chunk if intercept is enabled
+	if ui.Interceptor.IsEnabled() {
+		firstBuf := make([]byte, 65536)
+		n, readErr := clientReader.Read(firstBuf)
+		if n > 0 {
+			data, forward := ui.Interceptor.Submit(connRecord, firstBuf[:n])
+			if !forward {
+				connRecord.mu.Lock()
+				connRecord.Status = "DROPPED"
+				connRecord.mu.Unlock()
+				ui.RefreshList()
+				return
+			}
+			// Write the (possibly modified) data through the capture writer
+			if _, err := c2s.Write(data); err != nil {
+				connRecord.mu.Lock()
+				connRecord.Status = "FAILED"
+				connRecord.mu.Unlock()
+				ui.RefreshList()
+				return
+			}
+		}
+		if readErr != nil {
+			connRecord.mu.Lock()
+			connRecord.Status = "CLOSED"
+			connRecord.mu.Unlock()
+			ui.RefreshList()
+			return
+		}
+	}
+
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(c2s, clientReader)
